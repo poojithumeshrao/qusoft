@@ -1,8 +1,13 @@
 import torch
 import torch.nn as nn
+from qiskit_machine_learning.connectors import TorchConnector
+from qiskit import *
+from qiskit.circuit.library import ZZFeatureMap,TwoLocal,EfficientSU2
+from qiskit_machine_learning.neural_networks import EstimatorQNN
+from qiskit_machine_learning.circuit.library import RawFeatureVector
+from qiskit.quantum_info import SparsePauliOp
+from qiskit.circuit import ParameterVector
 from torch.nn.functional import normalize
-import pennylane as qml
-import sys
 
 torch.set_default_tensor_type(torch.DoubleTensor)
 
@@ -37,54 +42,70 @@ class EmbedLayer(nn.Module):
         return x
 
 
-class QuantumAttention(nn.Module):
-    def __init__(self, args):
-        super().__init__()
-        self.args = args
-        self.wires = 12
-        self.dev = qml.device('default.qubit', wires=self.wires)
-        self.n_features = 2**(self.wires//3)
-        self.shape =  qml.StronglyEntanglingLayers.shape(n_wires=len(range(2*(self.wires//3))),n_layers = 5)
-        self.weights = nn.Parameter(torch.empty(size=self.shape))
-        self.qnode = qml.QNode(self.qnn_attention,self.dev,interface='torch')
-
-    def feature_map(self,f1 = None,f2 = None,q1 = None,q2 = None):
-        #print(f1.shape)
-        qml.MottonenStatePreparation(state_vector=f1, wires=q1)
-        qml.MottonenStatePreparation(state_vector=f2, wires=q2)
-
-    def measure(self,q1,q2,q3):
-        for i in range(len(q1)):
-            qml.CNOT(wires=[q1[i],q2[i]])
-            qml.Hadamard(wires=[q3[i]])
-
-        for i in range(len(q1)):
-            qml.Toffoli(wires=[q2[i],q3[i],q1[i]])
-
-        for i in range(len(q1)):
-            qml.CNOT(wires=[q1[i],q2[i]])
-            qml.Hadamard(wires=[q3[i]])
-
-    def qnn_attention(self,f1,f2,w,wires):
-        self.feature_map(f1,f2,range(wires//3),range(wires//3,2*(wires//3)))
-        qml.StronglyEntanglingLayers(weights=w, wires=range(2*(wires//3)), imprimitive=qml.ops.CZ)
-        self.measure(range(wires//3),range(wires//3,2*(wires//3)),range(2*(wires//3),wires))
-        return qml.probs(wires=range(2*(wires//3),wires))
-
-    def forward(self,x):
-        outputs = torch.empty((0),dtype=torch.double)
-
-        for sample in x:
-            f1,f2 = sample[:self.n_features],sample[self.n_features:]
-            #print(f1.shape,f2.shape)
-            #print(self.qnode(f1=f1,f2=f2,w=self.weights,wires=self.wires)[0])
-            outputs = torch.cat((outputs,torch.Tensor(self.qnode(f1=f1,f2=f2,w=self.weights,wires=self.wires)[0]).reshape(1)))
-            #print(sys.getsizeof(outputs)/1024)
-        return outputs
-
-    
-
 class SelfAttention(nn.Module):
+    def encode_circ_raw(self,num_features = 4,param_name = ''):
+        vec = ParameterVector(param_name,num_features)
+        qc = RawFeatureVector((num_features))
+        qc.assign_parameters(vec,inplace=True)
+        #print(qc.parameters)
+        return qc
+
+    def encode_circ_zz(self,num_features = 2):
+        qc = EfficientSU2(num_features*2,parameter_prefix='input',reps=5)
+        return qc
+
+    def entangle_circ(self,num_features = 2):
+        qc = TwoLocal(num_features * 2,reps = 1,rotation_blocks = 'ry',entanglement_blocks = 'cx',skip_final_rotation_layer = True)
+        return qc
+
+    def measure_circ(self,reg_a,reg_b,reg_c, num_features = 2):
+    
+        mc = QuantumCircuit(reg_a,reg_b,reg_c)
+
+        #Perform controlled SWAP test for measuring entanglement
+        
+        for i in range(num_features):
+            mc.cx( reg_a[i],reg_b[i])
+            mc.h(reg_c[i])
+
+        for i in range(num_features):
+            mc.ccx(reg_b[i],reg_c[i],reg_a[i])
+
+        for i in range(num_features):
+            mc.cx(reg_a[i],reg_b[i])
+            mc.h(reg_c[i])
+        return mc
+
+    def get_QNN(self,num_features=4):
+        
+        reg_a = QuantumRegister(num_features)
+        reg_b = QuantumRegister(num_features)
+        reg_c = QuantumRegister(num_features)
+        
+        qc = QuantumCircuit(reg_a,reg_b,reg_c)
+        #fm = self.encode_circ_zz(num_features=num_features)
+        f1 = self.encode_circ_raw(2**num_features,param_name='reg_a')
+        f2 = self.encode_circ_raw(2**num_features,param_name='reg_b')
+
+        qc.compose(f1,inplace=True,qubits=reg_a)
+        qc.compose(f2,inplace=True,qubits=reg_b)
+        
+        pqc = self.entangle_circ(num_features=num_features)
+        qc.compose(pqc,inplace=True)
+        qc.compose(self.measure_circ(reg_a,reg_b,reg_c,num_features=num_features),inplace=True)
+
+        o1 = SparsePauliOp.from_list([("I"*2*num_features+"X"*num_features,1)])
+
+        qnn = EstimatorQNN(
+            circuit=qc,
+            input_params=list(f1.parameters)+list(f2.parameters),
+            weight_params=pqc.parameters,
+            observables = o1,
+            input_gradients = True
+        )
+
+        return qnn
+
     def __init__(self, args):
         super().__init__()
         self.n_attention_heads = args.n_attention_heads
@@ -94,9 +115,11 @@ class SelfAttention(nn.Module):
         self.queries = nn.Linear(self.embed_dim, self.head_embed_dim * self.n_attention_heads, bias=True)
         self.keys = nn.Linear(self.embed_dim, self.head_embed_dim * self.n_attention_heads, bias=True)
         self.values = nn.Linear(self.embed_dim, self.head_embed_dim * self.n_attention_heads, bias=True).double()
-        self.qnn = QuantumAttention(args)
+        self.qnn = TorchConnector(self.get_QNN(5)).double()
+
     def forward(self, x):
         m, s, e = x.shape
+
         t = torch.empty((0,s,2*e),dtype=torch.double)
         x = x.double()
 
@@ -129,7 +152,6 @@ class SelfAttention(nn.Module):
         #print(t.reshape([-1,2*e])[:,-32:].norm(dim=1),t.type())
         #print(t.reshape([-1,2*e])[:,:-32].norm(dim=1),t.type())
         x_attention = self.qnn(t.reshape([-1,2*e]))
-        del t
         x_attention = x_attention.reshape(m,s,s)
         #x_attention = xq.bmm(xk)  # (BH), Q, HE  .  (BH), HE, K -> (BH), Q, K
         x_attention = torch.softmax(x_attention, dim=-1)

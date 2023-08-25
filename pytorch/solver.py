@@ -84,7 +84,7 @@ class Solver(object):
                 clf_loss.backward()
                 optimizer.step()
 
-                if i % 50 == 0 or i == (iter_per_epoch - 1):
+                if i % 10 == 0 or i == (iter_per_epoch - 1):
                     print('Ep: %d/%d, it: %d/%d, err: %.4f' % (epoch + 1, self.args.epochs, i + 1, iter_per_epoch, clf_loss))
 
             test_acc, cm = self.test_dataset('test')
