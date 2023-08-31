@@ -76,10 +76,7 @@ class QuantumAttention(nn.Module):
 
         for sample in x:
             f1,f2 = sample[:self.n_features],sample[self.n_features:]
-            #print(f1.shape,f2.shape)
-            #print(self.qnode(f1=f1,f2=f2,w=self.weights,wires=self.wires)[0])
             outputs = torch.cat((outputs,torch.Tensor(self.qnode(f1=f1,f2=f2,w=self.weights,wires=self.wires)[0]).reshape(1)))
-            #print(sys.getsizeof(outputs)/1024)
         return outputs
 
     
@@ -103,13 +100,7 @@ class SelfAttention(nn.Module):
         #print(x.shape)
         for bat in x:
             for vec in normalize(bat):
-                #print(vec)
-                #print((vec.repeat(bat.shape[0],1).double(),normalize(bat)).double())
                 t = torch.cat((t,torch.stack((vec.repeat(bat.shape[0],1),normalize(bat)),1).reshape(1,s,2*e)))
-                #print(t)
-                #print("ppppppppppppppppp")
-                #break
-        
         
         # xq = self.queries(x).reshape(m, s, self.n_attention_heads, self.head_embed_dim)  # B, Q, E -> B, Q, H, HE
         # xq = xq.transpose(1, 2)  # B, Q, H, HE -> B, H, Q, HE
@@ -126,8 +117,6 @@ class SelfAttention(nn.Module):
         
         # xk = xk.transpose(1, 2)  # (BH), K, HE -> (BH), HE, K
 
-        #print(t.reshape([-1,2*e])[:,-32:].norm(dim=1),t.type())
-        #print(t.reshape([-1,2*e])[:,:-32].norm(dim=1),t.type())
         x_attention = self.qnn(t.reshape([-1,2*e]))
         del t
         x_attention = x_attention.reshape(m,s,s)
