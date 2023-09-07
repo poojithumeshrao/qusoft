@@ -3,8 +3,16 @@ import torch.nn as nn
 from torch.nn.functional import normalize
 import pennylane as qml
 import sys
+import torch.distributed as dist
+
+import torch.multiprocessing as mp
+
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 torch.set_default_tensor_type(torch.DoubleTensor)
+#size = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
+
+#dist.init_process_group("gloo", rank=rank, world_size=size)
 
 # B -> Batch Size
 # C -> Number of Input Channels
@@ -44,7 +52,7 @@ class QuantumAttention(nn.Module):
         self.wires = 12
         self.dev = qml.device('default.qubit', wires=self.wires)
         self.n_features = 2**(self.wires//3)
-        self.shape =  qml.StronglyEntanglingLayers.shape(n_wires=len(range(2*(self.wires//3))),n_layers = 5)
+        self.shape =  qml.StronglyEntanglingLayers.shape(n_wires=len(range(2*(self.wires//3))),n_layers = 1)
         self.weights = nn.Parameter(torch.empty(size=self.shape))
         self.qnode = qml.QNode(self.qnn_attention,self.dev,interface='torch')
 
@@ -72,14 +80,15 @@ class QuantumAttention(nn.Module):
         return qml.probs(wires=range(2*(wires//3),wires))
 
     def forward(self,x):
-        outputs = torch.empty((0),dtype=torch.double)
-
+        o = torch.empty((0))
         for sample in x:
             f1,f2 = sample[:self.n_features],sample[self.n_features:]
-            outputs = torch.cat((outputs,torch.Tensor(self.qnode(f1=f1,f2=f2,w=self.weights,wires=self.wires)[0]).reshape(1)))
-        return outputs
-
-    
+            o = torch.cat((o,torch.Tensor(self.qnode(f1=f1,f2=f2,w=self.weights,wires=self.wires)[0]).reshape(1)))
+            #outputs = q.get()
+            #outputs = torch.cat((outputs,o))
+            #q.put(outputs)
+            
+        return o
 
 class SelfAttention(nn.Module):
     def __init__(self, args):
@@ -92,15 +101,32 @@ class SelfAttention(nn.Module):
         self.keys = nn.Linear(self.embed_dim, self.head_embed_dim * self.n_attention_heads, bias=True)
         self.values = nn.Linear(self.embed_dim, self.head_embed_dim * self.n_attention_heads, bias=True).double()
         self.qnn = QuantumAttention(args)
+        self.qnn.share_memory()
+        
     def forward(self, x):
         m, s, e = x.shape
         t = torch.empty((0,s,2*e),dtype=torch.double)
         x = x.double()
 
+        outputs = torch.empty((0),dtype=torch.double)
+
         #print(x.shape)
+
+        processes = []
+        #q = mp.Queue()
+        print(x.shape)
         for bat in x:
             for vec in normalize(bat):
-                t = torch.cat((t,torch.stack((vec.repeat(bat.shape[0],1),normalize(bat)),1).reshape(1,s,2*e)))
+                #q.put(outputs)
+                #with mp.Pool(64) as p:
+                #    o = p.map(self.qnn,torch.stack((vec.repeat(bat.shape[0],1),normalize(bat)),1).reshape(s,2*e))
+                outputs = torch.cat((outputs,self.qnn(torch.stack((vec.repeat(bat.shape[0],1),normalize(bat)),1).reshape(s,2*e))))
+            #print(outputs.shape)
+        #for op in o:
+        #    outputs = torch.cat((outputs,op))
+        
+        #t = torch.cat((t,torch.stack((vec.repeat(bat.shape[0],1),normalize(bat)),1).reshape(1,s,2*e)))
+
         
         # xq = self.queries(x).reshape(m, s, self.n_attention_heads, self.head_embed_dim)  # B, Q, E -> B, Q, H, HE
         # xq = xq.transpose(1, 2)  # B, Q, H, HE -> B, H, Q, HE
@@ -117,9 +143,9 @@ class SelfAttention(nn.Module):
         
         # xk = xk.transpose(1, 2)  # (BH), K, HE -> (BH), HE, K
 
-        x_attention = self.qnn(t.reshape([-1,2*e]))
-        del t
-        x_attention = x_attention.reshape(m,s,s)
+        #x_attention = self.qnn(t.reshape([-1,2*e]))
+        #del t
+        x_attention = outputs.reshape(m,s,s)
         #x_attention = xq.bmm(xk)  # (BH), Q, HE  .  (BH), HE, K -> (BH), Q, K
         x_attention = torch.softmax(x_attention, dim=-1)
         
