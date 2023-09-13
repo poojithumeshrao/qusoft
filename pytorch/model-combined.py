@@ -9,8 +9,6 @@ import torch.multiprocessing as mp
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-import numpy as np
-
 torch.set_default_tensor_type(torch.DoubleTensor)
 #size = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
 
@@ -51,10 +49,10 @@ class QuantumAttention(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.wires = 8
+        self.wires = 12
         self.dev = qml.device('default.qubit', wires=self.wires)
-        self.n_features = 2**(self.wires//2)
-        self.shape =  qml.StronglyEntanglingLayers.shape(n_wires=len(range(2*(self.wires//2))),n_layers = 1)
+        self.n_features = 2**(self.wires//3)
+        self.shape =  qml.StronglyEntanglingLayers.shape(n_wires=len(range(2*(self.wires//3))),n_layers = 1)
         self.weights = nn.Parameter(torch.empty(size=self.shape))
         self.qnode = qml.QNode(self.qnn_attention,self.dev,interface='torch')
 
@@ -76,21 +74,16 @@ class QuantumAttention(nn.Module):
             qml.Hadamard(wires=[q3[i]])
 
     def qnn_attention(self,f1,f2,w,wires):
-        self.feature_map(f1,f2,range(wires//2),range(wires//2,2*(wires//2)))
-        qml.StronglyEntanglingLayers(weights=w, wires=range(2*(wires//2)), imprimitive=qml.ops.CZ)
-        qml.SWAP(wires=[1,4])
-        qml.SWAP(wires=[3,6])
-        #self.measure(range(wires//3),range(wires//3,2*(wires//3)),range(2*(wires//3),wires))
-        obs_mat = np.array([[1.5,0,0,0],[0,1.5,0,0],[0,0,0,0],[0,0,0,0]])
-        meas_herm = qml.Hermitian(obs_mat,wires=[0,1]) @ qml.Hermitian(obs_mat,wires=[2,3]) @ qml.Hermitian(obs_mat,wires=[4,5]) @ qml.Hermitian(obs_mat,wires=[6,7])
-        #measure_ham = qml.Hamiltonian((1,),(meas_herm,))        
-        return qml.expval(meas_herm)
+        self.feature_map(f1,f2,range(wires//3),range(wires//3,2*(wires//3)))
+        qml.StronglyEntanglingLayers(weights=w, wires=range(2*(wires//3)), imprimitive=qml.ops.CZ)
+        self.measure(range(wires//3),range(wires//3,2*(wires//3)),range(2*(wires//3),wires))
+        return qml.probs(wires=range(2*(wires//3),wires))
 
     def forward(self,x):
         o = torch.empty((0))
         for sample in x:
             f1,f2 = sample[:self.n_features],sample[self.n_features:]
-            o = torch.cat((o,torch.Tensor(self.qnode(f1=f1,f2=f2,w=self.weights,wires=self.wires)).reshape(1)))
+            o = torch.cat((o,torch.Tensor(self.qnode(f1=f1,f2=f2,w=self.weights,wires=self.wires)[0]).reshape(1)))
             #outputs = q.get()
             #outputs = torch.cat((outputs,o))
             #q.put(outputs)
@@ -121,7 +114,7 @@ class SelfAttention(nn.Module):
 
         processes = []
         #q = mp.Queue()
-        #print(x.shape)
+        print(x.shape)
         for bat in x:
             for vec in normalize(bat):
                 #q.put(outputs)
